@@ -1,15 +1,20 @@
 ---
 title: "Histocial CPUE for five flatfish species in the Pacific region"
 author: "Sean Anderson and Elise Keppel"
-output: html_document
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
 ---
 
 ```{r, knitr-opts, echo=FALSE, cache=FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment = "#>",
-  fig.asp = 0.618,
+  fig.asp = 0.9,
+  out.width = "85%",
+  fig.align = "center",
   autodep = TRUE,
   cache = TRUE,
   cache.comments = FALSE
@@ -46,6 +51,8 @@ d <- d %>%
   filter(!is.na(hours_fished), !is.na(total), total > 0, hours_fished > 0) %>%
   filter(!is.na(year))
 ```
+
+# Unstandardized CPUE timeseries
 
 Now let's calculate the arithmetic and geometric mean CPUE for each species in each year:
 
@@ -138,7 +145,7 @@ pre_1996_cpue <- out_stand_df %>%
 
 Note a huge difference. Blue is standardized, black is the raw geometric mean by year.
 
-```{r, fig.asp=0.3}
+```{r}
 pre_1996_cpue %>% group_by(area, species_common_name) %>% 
   mutate(
     geo_cpue = geo_cpue / exp(mean(log(geo_cpue))),
@@ -180,6 +187,7 @@ if (!file.exists("data/cpue-post-1996-fits.rds")) {
 } else {
   post_1996_cpue <- readRDS("data/cpue-post-1996-fits.rds")
 }
+post_1996_cpue$term <- NULL # avoid confusion
 ```
 
 ```{r}
@@ -194,10 +202,51 @@ ggplot(post_1996_cpue, aes(year, est)) +
   theme_pbs()
 ```
 
-Save the derived data:
+# Save the derived data
 
 ```{r}
 raw_summarized_cpue <- d_sum
 save(pre_1996_cpue, post_1996_cpue, raw_summarized_cpue, 
   file = "data/flatfish-cpue.rda", compress = TRUE)
 ```
+
+Look at it: 
+
+```{r}
+glimpse(raw_summarized_cpue)
+glimpse(pre_1996_cpue)
+glimpse(post_1996_cpue)
+```
+
+# Some things to note
+
+- `pre_1996_cpue$cpue_pred` is the standardized pre-1996 CPUE in natural log space
+- We're calculating arithmetic and geometric CPUE as has commonly been done in past Research Documents (the first sums across the entire year and the second is calculated on individual fishing events)
+- `post_1996_cpue$est` is the standardized post-1996 CPUE in natural (not log) space. Note that it has been centered by the geometric mean. If you would prefer, I could output an uncentered version.
+- The pre-1996 CPUE is calculated on just the positive fishing events for that species
+- The post-1996 CPUE (in the standardized version) as calculated as a delta model
+- The unstandardized data in `raw_summarized_cpue` is for positive fishing events only
+- The standardization procedure (post 1996) follow the approach outlined in the groundfish synopsis report, which attempts to reproduce the methods used in recent groundfish research documents
+- The fleet definition for post-1996 is as follows:
+
+```
+min_positive_tows = 100,
+min_positive_trips = 4,
+min_yrs_with_trips = 4,
+lat_band_width = 0.2,
+depth_band_width = 50,
+clean_bins = TRUE,
+depth_bin_quantiles = c(0.02, 0.98),
+lat_bin_quantiles = c(0.01, 0.99)
+```
+
+where
+
+```
+min_positive_tows	= The minimum number of positive tows over all years
+min_positive_trips = The minimum number of annual positive trips
+min_yrs_with_trips = The number of years in which the min_positive_trips criteria needs to be met
+```
+
+- Depths outside of the quantiles as defined above are discarded. These methods will soon be expanded upon within the groundfish synopsis document.
+- In both standardizations, the reference factor level is the most common factor level for that area and species. This only adjusts the pre-1996 timeseries up and down because it only deals with a positive component. It can have minor effects on the shape of the post-1996 timeseries because of the combining of the probability and positive component.
