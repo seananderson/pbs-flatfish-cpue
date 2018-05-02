@@ -1,0 +1,203 @@
+---
+title: "Histocial CPUE for five flatfish species in the Pacific region"
+author: "Sean Anderson and Elise Keppel"
+output: html_document
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+---
+
+```{r, knitr-opts, echo=FALSE, cache=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.asp = 0.618,
+  autodep = TRUE,
+  cache = TRUE,
+  cache.comments = FALSE
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gfplot)
+```
+
+Extract catch and effort data from all databases for species of interest. This will only work at PBS an authorized computer.
+
+```{r, eval=FALSE}
+species <- c("Arrowtooth Flounder", "English Sole", "Dover Sole", 
+  "Southern Rock Sole", "Petrale Sole") 
+d <- gfplot::get_cpue_historic(species, fishing_year = FALSE, end_year = 2017)
+saveRDS(d, file = "data/flatfish-cpue-data.rds", compress = FALSE)
+```
+
+Read the data in, clean up the column names, and create columns for the major statistical areas:
+
+```{r}
+d <- readRDS("data/flatfish-cpue-data.rds")
+d <- rename(d, year = fyear)
+d <- mutate(d, species_common_name = tolower(species_common_name))
+```
+
+Filter down to remove all rows of data with missing hours fished, missing total catch, or when the total catch or hours fished are 0.
+
+```{r}
+d <- d %>%
+  filter(!is.na(hours_fished), !is.na(total), total > 0, hours_fished > 0) %>%
+  filter(!is.na(year))
+```
+
+Now let's calculate the arithmetic and geometric mean CPUE for each species in each year:
+
+```{r}
+d_sum <- d %>%
+  group_by(area, year, species_common_name) %>%
+  summarise(
+    catch = sum(total, na.rm = TRUE),
+    sum_hours_fished = sum(hours_fished, na.rm = TRUE),
+    arith_cpue = sum(total, na.rm = TRUE) / sum(hours_fished, na.rm = TRUE),
+    geo_cpue = exp(mean(log(total / hours_fished), na.rm = TRUE))
+  ) %>%
+  ungroup()
+```
+
+Let's create a version that is scaled by the geometric mean for plotting to mimic past research documents:
+
+```{r}
+d_scaled <- d_sum %>%
+  mutate(arith_cpue = arith_cpue / exp(mean(log(arith_cpue)))) %>%
+  mutate(geo_cpue = geo_cpue / exp(mean(log(geo_cpue))))
+```
+
+Plot of the scaled version with species in different rows:
+
+```{r}
+p <- d_scaled %>%
+  tidyr::gather(cpue_type, cpue_value, arith_cpue:geo_cpue) %>%
+  ggplot(aes(year, cpue_value, linetype = cpue_type)) +
+  geom_line() +
+  geom_vline(xintercept = 1996, lty = 3) +
+  facet_grid(species_common_name~area, scales = "free_y") +
+  xlab("") +
+  ylab("CPUE divided by geometric mean") +
+  ylim(0, NA) +
+  theme_pbs() +
+  labs(linetype = "CPUE type")
+p
+```
+
+# Standardizing data from before 1996
+
+Let's explore possible index standardization.
+
+```{r pre-1996-fits, message=FALSE, warning=FALSE}
+d <- mutate(d, cpue = total / hours_fished)
+d_pre1996 <- filter(d, year < 1996)
+d_pre1996$year_factor <- as.factor(d_pre1996$year)
+
+out_stand <- plyr::dlply(d_pre1996, c("area", "species_common_name"), function(x) {
+  
+  message(unique(x$area), " - ", unique(x$species_common_name))
+  x$locality_factor <- gfplot::f(x$locality_description, ref = get_most_common_level)
+  x$month_factor <- gfplot::f(x$month, ref = get_most_common_level)
+  
+  m <- lm(log(cpue) ~ year_factor + locality_factor + month_factor, data = x)
+  
+  nd <- data.frame(year_factor = unique(x$year_factor), 
+    locality_factor = 
+      factor(levels(x$locality_factor)[[1]], levels = levels(x$locality_factor)),
+    month_factor = 
+      factor(levels(x$month_factor)[[1]], levels = levels(x$month_factor))
+  ) %>% 
+    arrange(year_factor)
+  nd$cpue_pred <- predict(m, newdata = nd)
+  nd$cpue_pred_se <- predict(m, newdata = nd, se = TRUE)$se.fit
+  list(dat = nd, model = m, spp = unique(x$species_common_name))
+})
+
+out_stand_df <- plyr::ldply(out_stand, function(x) x$dat)
+
+out_m <- lapply(out_stand, function(xx) {
+  x <- broom::tidy(xx$model, conf.int = TRUE)
+  x$term_group <- gsub("([a-z]+)_[a-zA-Z0-9. \\>\\(\\)-\\/']*", "\\1", x$term)
+  g <- ggplot(x, aes(term, estimate, ymin = conf.low, ymax = conf.high)) +
+    geom_pointrange() +
+    facet_wrap(~term_group, scales = "free", ncol = 4) + 
+    coord_flip() +
+    ggtitle(xx$spp) +
+    theme_pbs()
+  ggsave(paste0("figs/pre-1996-coefs-", xx$sp, ".pdf"), width = 15, height = 8)
+})
+
+pre_1996_cpue <- out_stand_df %>% 
+  mutate(year = as.numeric(as.character(year_factor))) %>% 
+  left_join(select(filter(d_sum, year < 1996), area, species_common_name, year, geo_cpue), 
+    by = c("area", "species_common_name", "year")) %>% 
+  as_tibble()
+```
+
+Note a huge difference. Blue is standardized, black is the raw geometric mean by year.
+
+```{r, fig.asp=0.3}
+pre_1996_cpue %>% group_by(area, species_common_name) %>% 
+  mutate(
+    geo_cpue = geo_cpue / exp(mean(log(geo_cpue))),
+    cpue_pred = log(exp(cpue_pred) / exp(mean(log(exp(cpue_pred))))),
+    cpue_stand_lwr = exp(cpue_pred - 2 * cpue_pred_se),
+    cpue_stand_upr = exp(cpue_pred + 2 * cpue_pred_se)
+  ) %>% 
+  ggplot(aes(year, geo_cpue)) +
+  geom_line(colour = "grey30") +
+  geom_line(aes(y = exp(cpue_pred)), colour = "blue") +
+  geom_ribbon(aes(ymin = cpue_stand_lwr, ymax = cpue_stand_upr), fill = "blue", alpha = 0.1) +
+  facet_grid(species_common_name~area, scales = "free_y") +
+  xlab("") +
+  ylab("CPUE") +
+  coord_cartesian(ylim = c(0, 8), expand = FALSE) +
+  theme_pbs()
+```
+
+# Standardizing the data from after 1996
+
+```{r, eval=FALSE}
+cpue_dat <- gfplot::get_cpue_index(gear = "bottom trawl", min_year = 1996)
+```
+
+```{r, echo=FALSE}
+cpue_dat <- readRDS("../gfsynopsis/report/data-cache2/pbs-cpue-index.rds")
+```
+
+```{r post-1996-fits, message=FALSE, warning=FALSE, cache=FALSE}
+if (!file.exists("data/cpue-post-1996-fits.rds")) {
+  post_1996_cpue <- purrr::map_df(unique(d$species_common_name), function(x) {
+    message(x)
+    o <- gfsynopsis:::fit_cpue_indices(cpue_dat, species = x,
+      areas = c("5[CDE]+", "5[AB]+", "3[CD]+"), center = TRUE)
+    o$species_common_name <- x
+    o
+  })
+  saveRDS(post_1996_cpue, file = "data/cpue-post-1996-fits.rds", compress = FALSE)
+} else {
+  post_1996_cpue <- readRDS("data/cpue-post-1996-fits.rds")
+}
+```
+
+```{r}
+ggplot(post_1996_cpue, aes(year, est)) +
+  geom_line(colour = "blue") +
+  geom_line(aes(y = est_unstandardized), colour = "grey30") +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), fill = "blue", alpha = 0.1) +
+  facet_grid(species_common_name~area, scales = "free_y") +
+  xlab("") +
+  facet_grid(species_common_name~area, scales = "free_y") +
+  ylab("CPUE") +
+  theme_pbs()
+```
+
+Save the derived data:
+
+```{r}
+raw_summarized_cpue <- d_sum
+save(pre_1996_cpue, post_1996_cpue, raw_summarized_cpue, 
+  file = "data/flatfish-cpue.rda", compress = TRUE)
+```
